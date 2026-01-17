@@ -38,8 +38,17 @@ def main():
     print(f"   HTTP/2: Enabled")
     print(f"   URL: http://{host}:{port}/mcp")
 
-    # Get the ASGI app from FastMCP for streamable HTTP transport
-    app = mcp.streamable_http_app()
+    # Get transport from environment variable
+    transport = os.getenv("TRANSPORT", "streamable-http")
+    print(f"   Transport: {transport}")
+
+    # Get the appropriate ASGI app based on transport type
+    if transport == "sse":
+        print(f"   Using SSE transport - /sse endpoint")
+        app = mcp.sse_app()
+    else:
+        print(f"   Using Streamable HTTP transport - /mcp endpoint")
+        app = mcp.streamable_http_app()
 
     # Run the server
     asyncio.run(serve(app, config))

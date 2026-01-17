@@ -1,0 +1,41 @@
+# Ollama Docker Compose
+# Run LLM models locally with GPU acceleration
+# Usage:
+#   docker compose up -d              # Start Ollama service
+#   docker compose exec ollama ollama pull llama2  # Pull a model
+#   docker compose logs -f            # View logs
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    networks:
+      - ollama-network
+    restart: unless-stopped
+    # Uncomment for NVIDIA GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  ollama_models:
+    driver: local
+
+networks:
+  ollama-network:
+    driver: bridge
+    name: ollama-network

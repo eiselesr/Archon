@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -560,7 +561,12 @@ async def http_health_endpoint(request: Request):
         if _shared_context and hasattr(_shared_context, "health_status"):
             # Use actual server startup time for consistency with MCP health_check tool
             uptime = time.time() - _shared_context.startup_time
-            await perform_health_checks(_shared_context)
+            # Perform dependency health checks with a short timeout to keep endpoint responsive
+            try:
+                await asyncio.wait_for(perform_health_checks(_shared_context), timeout=2.0)
+            except Exception as e:
+                # Don't fail the health endpoint if sub-checks are slow or error out
+                logger.warning(f"Health sub-check timeout or error: {e}")
 
             return JSONResponse({
                 "success": True,

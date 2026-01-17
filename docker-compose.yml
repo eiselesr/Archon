@@ -88,6 +88,7 @@ services:
       - SERVICE_DISCOVERY_MODE=docker_compose
       - TRANSPORT=sse
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - MCP_DEBUG=true
       # MCP needs to know where to find other services
       - API_SERVICE_URL=http://archon-server:${ARCHON_SERVER_PORT:-8181}
       - AGENTS_ENABLED=${AGENTS_ENABLED:-false}

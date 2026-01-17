@@ -1,6 +1,8 @@
 """
-Hypercorn runner for MCP server with HTTP/2 support.
-This script wraps the FastMCP ASGI app with Hypercorn to enable HTTP/2.
+ASGI runner for MCP server.
+
+- Streamable HTTP transport: Use Hypercorn with HTTP/2 (ALPN) for Roocode/mcp-remote.
+- SSE transport: Use Uvicorn to avoid Hypercorn SSE response state errors.
 """
 import asyncio
 import os
@@ -9,9 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hypercorn.asyncio import serve
-from hypercorn.config import Config
+from hypercorn.asyncio import serve as hypercorn_serve
+from hypercorn.config import Config as HypercornConfig
+import uvicorn
 from src.mcp_server.mcp_server import mcp
+from src.mcp_server.utils.asgi_debug import ASGIDebugWrapper
 
 
 def main():
@@ -19,39 +23,40 @@ def main():
     host = "0.0.0.0"
     port = int(os.getenv("ARCHON_MCP_PORT", "8051"))
 
-    # Create Hypercorn config
-    config = Config()
-    config.bind = [f"{host}:{port}"]
-
-    # Enable HTTP/2 with ALPN negotiation
-    # This allows remote MCP clients (mcp-remote, Roocode) to negotiate HTTP/2
-    config.alpn_protocols = ["h2", "http/1.1"]
-
-    # Logging
-    config.accesslog = "-"
-    config.errorlog = "-"
-    config.loglevel = "INFO"
-
-    print(f"🚀 Starting MCP server with Hypercorn")
-    print(f"   Host: {host}")
-    print(f"   Port: {port}")
-    print(f"   HTTP/2: Enabled")
-    print(f"   URL: http://{host}:{port}/mcp")
-
     # Get transport from environment variable
     transport = os.getenv("TRANSPORT", "streamable-http")
+    print(f"🚀 Starting MCP server")
+    print(f"   Host: {host}")
+    print(f"   Port: {port}")
     print(f"   Transport: {transport}")
 
-    # Get the appropriate ASGI app based on transport type
     if transport == "sse":
-        print(f"   Using SSE transport - /sse endpoint")
+        # SSE transport works reliably with Uvicorn; Hypercorn has ASGI state errors for SSE
+        print(f"   Using SSE transport with Uvicorn - endpoint: /sse")
         app = mcp.sse_app()
+        # Optional instrumentation via env flag
+        if os.getenv("MCP_DEBUG", "false").lower() in ("true", "1", "yes", "on"):
+            print("   MCP_DEBUG enabled: wrapping SSE app with ASGIDebugWrapper")
+            app = ASGIDebugWrapper(app)
+        # Uvicorn run (HTTP/1.1 is fine for SSE)
+        uvicorn.run(app, host=host, port=port, log_level="info")
     else:
-        print(f"   Using Streamable HTTP transport - /mcp endpoint")
-        app = mcp.streamable_http_app()
+        # Streamable HTTP transport with Hypercorn + HTTP/2
+        print(f"   Using Streamable HTTP transport with Hypercorn - endpoint: /mcp")
+        # Create Hypercorn config
+        config = HypercornConfig()
+        config.bind = [f"{host}:{port}"]
 
-    # Run the server
-    asyncio.run(serve(app, config))
+        # Enable HTTP/2 with ALPN negotiation
+        config.alpn_protocols = ["h2", "http/1.1"]
+
+        # Logging
+        config.accesslog = "-"
+        config.errorlog = "-"
+        config.loglevel = "INFO"
+
+        # Run Hypercorn
+        asyncio.run(hypercorn_serve(app := mcp.streamable_http_app(), config))
 
 
 if __name__ == "__main__":

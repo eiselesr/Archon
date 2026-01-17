@@ -32,25 +32,22 @@
 - No direct imports between services - HTTP-based communication only
 
 ## Validated Solution
-- **mcp-remote DOES support SSE transport!** 
+- **mcp-remote DOES support SSE transport!**
 - **Default behavior**: Tries HTTP (streamable-http) first, falls back to SSE
 - **Strategy flag**: `--transport sse-only` forces SSE-only (prevents streamable-http attempts)
-- **ISSUE FOUND**: Setting transport="sse" in mcp_server.py doesn't work because:
-  - FastMCP instance created at module import time (no transport parameter)
-  - run_hypercorn.py calls `mcp.streamable_http_app()` which is hardcoded
-  - TRANSPORT env var set in docker-compose.yml but not being used
-  - Need to update run_hypercorn.py to read TRANSPORT env var and call correct app method
-- **FIX APPLIED**: Updated run_hypercorn.py to read TRANSPORT env var and call `mcp.sse_app()` when transport=sse
-- **VERIFIED**: /sse endpoint now returns HTTP 200 with content-type: text/event-stream
-- **Roocode Config**: Updated to use http://localhost:8051/sse with --transport sse-only flag
-- **TESTED WITH ROOCODE**: 
-  - ✅ Connection established successfully (NO TIMEOUT!)
-  - ✅ Green indicator in Roocode
-  - ✅ SSE messages flowing back and forth
-  - ✅ Server stays responsive (dashboard still healthy)
-  - ⚠️ Some response formatting issues to debug (tools response malformed)
+- **Transport selection fix**: `run_hypercorn.py` now reads `TRANSPORT` env and selects `mcp.sse_app()` vs `mcp.streamable_http_app()`
+- **SSE runtime change**: SSE runs under Uvicorn (HTTP/1.1) to avoid Hypercorn ASGI state errors on `/sse`
+- **Instrumentation**: Added standalone ASGI wrapper `src/mcp_server/utils/asgi_debug.py`, enabled with `MCP_DEBUG=true` to log POST `/messages/` request types and SSE tool counts
+- **VERIFIED**: `/sse` returns 200 text/event-stream; Roocode connects (green indicator); tools now list correctly; server remains responsive; tools are callable and execute properly
+- **Notes**: Occasional `SseError: other side closed` in Roocode logs indicates reconnect behavior; not impacting tool calls
 
-The blocking problem is SOLVED! SSE transport works reliably without event loop hangs.
+The blocking problem is SOLVED and SSE transport is stable with Uvicorn. Roocode can now run MCP tools successfully via SSE transport.
+
+## Running Tools in Roocode
+- Open Roocode chat (Cmd/Ctrl+L or "New Chat")
+- Ask to perform an action (e.g., "Check the MCP server health" or "Find all projects")
+- Roocode will automatically invoke the appropriate MCP tool
+- Tool execution logs visible with `MCP_DEBUG=true` enabled
 
 ## References to Check When Investigating
 - **README.md** - Architecture section mentions "MCP Protocol: AI clients connect via SSE or stdio"

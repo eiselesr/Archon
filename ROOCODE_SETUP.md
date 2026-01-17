@@ -1,33 +1,58 @@
 # Roocode / Remote MCP Client Setup
 
-This document describes the setup for connecting Roocode and other remote MCP clients to Archon, including patches applied for HTTP/2 compatibility.
+This document describes the setup for connecting Roocode and other remote MCP clients to Archon using SSE transport.
 
 ## Status
 
-✅ **Working:** Roocode, mcp-remote, and other remote MCP clients can connect to Archon MCP server.
+✅ **Working:** Roocode and other remote MCP clients can connect to Archon MCP server via SSE transport.
 
 ## Issue Background
 
 **GitHub Issue:** [#920 - MCP Server Connection Timeout with mcp-remote Clients](https://github.com/coleam00/Archon/issues/920)
 
-The Archon MCP server uses FastMCP's `streamable-http` transport, which requires HTTP/2 negotiation via ALPN protocols. The original implementation used Uvicorn (HTTP/1.1 only), causing remote clients like `mcp-remote` and Roocode to timeout.
+The original Archon MCP server used FastMCP's `streamable-http` transport with Hypercorn, which caused event-loop blocking and timeouts when remote clients connected. The connection would appear to work initially but block all other requests.
 
-**Solution:** Use Hypercorn instead of Uvicorn, which provides native HTTP/2 support.
+**Solution:** Switch to SSE (Server-Sent Events) transport served by Uvicorn, which is non-blocking and handles long-lived client connections properly.
 
-## Applied Patches
+## Applied Configuration
 
-### 1. Enable HTTP/2 in Hypercorn (`python/src/mcp_server/run_hypercorn.py`)
+### 1. SSE Transport Selection (`python/src/mcp_server/run_hypercorn.py`)
 
+**Configuration:**
 ```python
-# Enable HTTP/2 with ALPN negotiation
-config.alpn_protocols = ["h2", "http/1.1"]
+if transport == "sse":
+    # SSE via Uvicorn (non-blocking, handles long-lived connections)
+    app = mcp.sse_app()
+    uvicorn_config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level=log_level_lower,
+    )
+    server = uvicorn.Server(uvicorn_config)
+else:
+    # Streamable-HTTP via Hypercorn (for HTTP/2 support)
+    app = mcp.streamable_http_app()
 ```
 
-**Why:** ALPN allows clients to negotiate HTTP/2 during the TLS handshake (or cleartext h2c). Without this, remote MCP clients cannot establish proper streaming connections.
+**Why:** SSE eliminates event-loop blocking issues because it doesn't require streaming binary protocols. Uvicorn handles SSE connections properly without hanging. FastMCP provides both `sse_app()` and `streamable_http_app()` for flexibility.
 
-**Status:** ✅ Applied in `run_hypercorn.py` (lines ~24-26)
+**Status:** ✅ Applied - reads `TRANSPORT` env variable from docker-compose.yml
 
-### 2. Increase Backend Health Check Timeout (`docker-compose.yml` and `.env`)
+### 2. Docker Compose Environment (`docker-compose.yml`)
+
+**archon-mcp service:**
+```yaml
+environment:
+  - TRANSPORT=sse
+  - MCP_DEBUG=true
+```
+
+**Why:** `TRANSPORT=sse` selects SSE transport; `MCP_DEBUG=true` enables ASGI instrumentation logging.
+
+**Status:** ✅ Applied in archon-mcp service environment
+
+### 3. Health Check Timeout (`docker-compose.yml` and `.env`)
 
 **docker-compose.yml:**
 ```yaml
@@ -39,25 +64,9 @@ config.alpn_protocols = ["h2", "http/1.1"]
 MCP_HEALTH_CHECK_TIMEOUT=10
 ```
 
-**Why:** The backend (`archon-server`) periodically checks MCP health via HTTP. If the check times out after 5s, the UI shows "UNHEALTHY" even when MCP is fine. Increasing to 10s reduces false negatives.
+**Why:** Backend health checks can timeout if the MCP service is slow to respond. 10s timeout reduces false "UNHEALTHY" status.
 
-**Important:** The `.env` file must also be updated, as it overrides the docker-compose default. If only docker-compose.yml is changed but .env still has the old value, the old value will be used.
-
-**Status:** ✅ Applied in both `docker-compose.yml` (archon-server service, environment section) and `.env` (line ~104)
-
-### 3. Optimize MCP Health Endpoint (`python/src/mcp_server/mcp_server.py`)
-
-```python
-# Perform dependency health checks with a short timeout
-try:
-    await asyncio.wait_for(perform_health_checks(_shared_context), timeout=2.0)
-except Exception as e:
-    logger.warning(f"Health sub-check timeout or error: {e}")
-```
-
-**Why:** The MCP `/health` endpoint can be slow if it waits on dependent services. Bounding checks to 2s keeps the endpoint responsive, preventing the backend from timing out.
-
-**Status:** ✅ Applied in `mcp_server.py` (lines ~558-563)
+**Status:** ✅ Applied in both files
 
 ## Roocode Configuration
 
@@ -70,13 +79,56 @@ except Exception as e:
       "command": "npx",
       "args": [
         "mcp-remote",
-        "http://localhost:8051/mcp",
-        "--allow-http"
+        "http://localhost:8051/sse",
+        "--allow-http",
+        "--transport",
+        "sse-only"
       ]
     }
   }
 }
 ```
+
+**Key points:**
+- `--transport sse-only` forces SSE transport (avoids fallback to streamable-http)
+- Endpoint is `/sse` (not `/mcp`)
+- `--allow-http` permits non-HTTPS connections for local development
+
+## Testing Tools
+
+### Running a Tool in Roocode
+
+1. **Open a new Roocode chat** (Cmd/Ctrl + L or click "New Chat")
+2. **Ask Roocode to use a tool**, for example:
+   - `Check the health of the MCP server`
+   - `Find all projects`
+   - `Search the knowledge base for "authentication"`
+3. **Roocode will automatically invoke the appropriate MCP tool** and display the result
+
+### Monitor Tool Execution
+
+In a terminal, watch the MCP logs while running a tool:
+
+```bash
+docker compose logs -f archon-mcp 2>&1 | grep --line-buffered -E "DEBUG|tool|SSE|POST|session"
+```
+
+With `MCP_DEBUG=true` enabled, you'll see:
+- `[MCP DEBUG] SSE tools count=16` - Shows tool list was sent
+- `[MCP DEBUG] POST /messages/ type=...` - Shows MCP requests coming in
+- Tool execution logs from the service handlers
+
+### Available Tools
+
+Access these tools through Roocode chat or the MCP settings panel:
+
+- `health_check` - Server health and uptime
+- `archon:find_projects` - List and search projects
+- `archon:find_tasks` - List and search tasks
+- `archon:find_documents` - List and search documents
+- `archon:rag_search_knowledge_base` - Search knowledge base
+- `archon:rag_search_code_examples` - Find code snippets
+- `archon:rag_get_available_sources` - List knowledge sources
 
 ## Health Checks (No IDE Required)
 
@@ -135,31 +187,34 @@ Expected: `running` (not "unhealthy")
 
 ### Test remote client connectivity
 ```bash
-timeout 10 mcp-remote http://localhost:8051/mcp --allow-http
+timeout 10 mcp-remote http://localhost:8051/sse --allow-http --transport sse-only
 ```
 Expected output includes:
-- "Connected to remote server using StreamableHTTPClientTransport"
+- "Connected to remote server using SSEClientTransport"
 - "Proxy established successfully"
 
-### Check HTTP/2 is negotiated
+### Check SSE endpoint is available
 ```bash
-curl -i http://localhost:8051/mcp --http2 2>&1 | grep -i "HTTP/2"
+curl -i http://localhost:8051/sse 2>&1 | grep -i "text/event-stream"
 ```
+Expected: `content-type: text/event-stream`
 
 ## Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
-| `mcp-remote` timeouts after 60s | ALPN not enabled or HTTP/2 not negotiated | Check `run_hypercorn.py` has `alpn_protocols` set |
-| Backend shows "unhealthy" but MCP is responding | Health check timeout too short | Update both `docker-compose.yml` AND `.env` to `MCP_HEALTH_CHECK_TIMEOUT=10` |
+| Roocode timeout on connection | SSE transport not selected | Verify `TRANSPORT=sse` in `docker-compose.yml` and `--transport sse-only` in Roocode config |
+| Backend shows "unhealthy" but MCP is responding | Health check timeout too short or endpoint slow | Update both `docker-compose.yml` AND `.env` to `MCP_HEALTH_CHECK_TIMEOUT=10` |
 | Backend shows "unhealthy" after restart | Changes to docker-compose.yml ignored | Check `.env` file for conflicting value of `MCP_HEALTH_CHECK_TIMEOUT` |
-| `/health` endpoint is slow | Dependency checks taking too long | Check `mcp_server.py` has 2s timeout on sub-checks |
-| Roocode can't connect | `mcp_settings.json` path wrong or `mcp-remote` not installed | Verify file location and run `npm install -g mcp-remote` |
+| `/sse` returns 503 or hangs | Uvicorn not running for SSE transport | Check `run_hypercorn.py` reads TRANSPORT env and uses `mcp.sse_app()` |
+| Roocode can't connect | `mcp_settings.json` path wrong or endpoint incorrect | Verify file and use `/sse` endpoint with `--allow-http` flag |
+| Tools not appearing in Roocode | Tools not registered or ListToolsRequest fails | Run `docker compose logs archon-mcp` with `MCP_DEBUG=true` to see request/response logs |
 
-## Future: Proposed PR Changes
+## Implementation Notes
 
-When the upstream issue is resolved, consider requesting a PR to include:
-1. Default ALPN protocols in `run_hypercorn.py`
-2. Environment variable for health check timeout in `docker-compose.yml`
-3. Faster `/health` endpoint with bounded dependency checks
+- **Transport selection:** Controlled via `TRANSPORT` environment variable (default: `sse`)
+- **Uvicorn for SSE:** Non-blocking I/O suitable for long-lived connections
+- **Hypercorn for streamable-http:** Available if needed, but SSE is preferred for remote clients
+- **Instrumentation:** `MCP_DEBUG=true` enables ASGI wrapper logging of MCP requests and tool counts
+- **Health endpoint:** `/health` returns JSON with server status, service dependencies, and uptime
 

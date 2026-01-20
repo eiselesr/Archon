@@ -104,30 +104,32 @@ if ! command -v mcp-remote &> /dev/null; then
 else
     pass "mcp-remote is installed"
     
-    # Test connection with timeout
+    # Test connection with timeout (SSE transport)
     echo "  Testing connection..."
-    if timeout 12 mcp-remote http://localhost:8051/mcp --allow-http > /tmp/mcp_remote_test.log 2>&1 &
-    then
-        MCP_REMOTE_PID=$!
-        sleep 3
-        
-        if kill -0 $MCP_REMOTE_PID 2>/dev/null; then
-            if grep -q "Proxy established successfully" /tmp/mcp_remote_test.log; then
-                pass "mcp-remote proxy established successfully"
-                kill $MCP_REMOTE_PID 2>/dev/null || true
-                wait $MCP_REMOTE_PID 2>/dev/null || true
-            else
-                warn "mcp-remote started but proxy status unclear"
-                kill $MCP_REMOTE_PID 2>/dev/null || true
-                wait $MCP_REMOTE_PID 2>/dev/null || true
-            fi
+    timeout 5 mcp-remote http://localhost:8051/sse --allow-http --transport sse-only > /tmp/mcp_remote_test.log 2>&1 &
+    MCP_REMOTE_PID=$!
+    sleep 3
+    
+    # Check if process is still running (should be alive and waiting)
+    if kill -0 $MCP_REMOTE_PID 2>/dev/null; then
+        # Process is running, check if proxy was established
+        if grep -q "Proxy established successfully" /tmp/mcp_remote_test.log; then
+            pass "mcp-remote proxy established successfully"
         else
-            fail "mcp-remote process failed to start"
+            warn "mcp-remote connected but proxy status unclear"
         fi
-        rm -f /tmp/mcp_remote_test.log
+        kill $MCP_REMOTE_PID 2>/dev/null || true
+        wait $MCP_REMOTE_PID 2>/dev/null || true
     else
-        fail "Could not start mcp-remote test"
+        # Process ended - check if it was successful
+        if grep -q "Proxy established successfully" /tmp/mcp_remote_test.log 2>/dev/null; then
+            pass "mcp-remote proxy established successfully"
+        else
+            fail "mcp-remote failed to establish proxy"
+            echo "  Log: $(head -3 /tmp/mcp_remote_test.log 2>/dev/null)"
+        fi
     fi
+    rm -f /tmp/mcp_remote_test.log
 fi
 
 # 5. Check backend config
@@ -149,14 +151,14 @@ else
     warn "MCP port is $PORT (expected 8051)"
 fi
 
-# 6. Check Hypercorn is running (not Uvicorn)
+# 6. Check ASGI server is running (Uvicorn for SSE, Hypercorn for streamable-http)
 section "Server Process Check"
 
-if docker compose logs archon-mcp | grep -q "Starting MCP server with Hypercorn"; then
-    pass "Hypercorn is running (HTTP/2 support enabled)"
-elif docker compose logs archon-mcp | grep -q "Starting MCP server with Uvicorn"; then
-    fail "Uvicorn is running (HTTP/2 not supported - use Hypercorn)"
-    echo "  The run_hypercorn.py fix may not be applied"
+if docker compose logs archon-mcp | grep -q "Uvicorn running on"; then
+    pass "Uvicorn is running (SSE transport enabled)"
+elif docker compose logs archon-mcp | grep -q "Starting MCP server with Hypercorn"; then
+    warn "Hypercorn is running (streamable-http transport - SSE transport not configured)"
+    echo "  For SSE transport: ensure TRANSPORT=sse in docker-compose.yml"
 else
     warn "Could not determine which ASGI server is running"
 fi
@@ -177,9 +179,9 @@ if [ $FAILED -eq 0 ]; then
     fi
     echo ""
     echo -e "MCP is ready for remote clients:"
-    echo "  • Roocode: Use mcp_settings.json config (see ROOCODE_SETUP.md)"
-    echo "  • Claude Desktop: Add to config with mcp-remote transport"
-    echo "  • CLI test: mcp-remote http://localhost:8051/mcp --allow-http"
+    echo "  • Roocode: Use mcp_settings.json config with SSE endpoint (see ROOCODE_SETUP.md)"
+    echo "  • Claude Desktop: Add to config with mcp-remote transport (SSE)"
+    echo "  • CLI test: mcp-remote http://localhost:8051/sse --allow-http --transport sse-only"
     exit 0
 else
     echo -e "${RED}✗ Some checks failed - see above for details${NC}"

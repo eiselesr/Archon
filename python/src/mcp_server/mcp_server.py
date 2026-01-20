@@ -65,9 +65,16 @@ from src.server.services.mcp_service_client import get_mcp_service_client
 from src.server.services.mcp_session_manager import get_session_manager
 
 # Global initialization lock and flag
-_initialization_lock = threading.Lock()
+_initialization_lock = None  # Will be created as asyncio.Lock when needed
 _initialization_complete = False
 _shared_context = None
+
+def get_init_lock():
+    """Get or create the async lock"""
+    global _initialization_lock
+    if _initialization_lock is None:
+        _initialization_lock = asyncio.Lock()
+    return _initialization_lock
 
 server_host = "0.0.0.0"  # Listen on all interfaces
 
@@ -144,8 +151,9 @@ async def lifespan(server: FastMCP) -> AsyncIterator[ArchonContext]:
         yield _shared_context
         return
 
-    # Acquire lock for initialization
-    with _initialization_lock:
+    # Acquire async lock for initialization
+    lock = get_init_lock()
+    async with lock:
         # Double-check pattern
         if _initialization_complete and _shared_context:
             logger.info("♻️ Reusing existing context for new SSE connection")
@@ -320,11 +328,8 @@ try:
 
     mcp = FastMCP(
         "archon-mcp-server",
-        description="MCP server for Archon - uses HTTP calls to other services",
         instructions=MCP_INSTRUCTIONS,
         lifespan=lifespan,
-        host=server_host,
-        port=server_port,
     )
     logger.info("✓ FastMCP server instance created successfully")
 

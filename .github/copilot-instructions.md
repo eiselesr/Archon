@@ -32,16 +32,42 @@
 - No direct imports between services - HTTP-based communication only
 
 ## Validated Solution
-- **mcp-remote DOES support SSE transport!**
-- **Default behavior**: Tries HTTP (streamable-http) first, falls back to SSE
-- **Strategy flag**: `--transport sse-only` forces SSE-only (prevents streamable-http attempts)
-- **Transport selection fix**: `run_hypercorn.py` now reads `TRANSPORT` env and selects `mcp.sse_app()` vs `mcp.streamable_http_app()`
-- **SSE runtime change**: SSE runs under Uvicorn (HTTP/1.1) to avoid Hypercorn ASGI state errors on `/sse`
-- **Instrumentation**: Added standalone ASGI wrapper `src/mcp_server/utils/asgi_debug.py`, enabled with `MCP_DEBUG=true` to log POST `/messages/` request types and SSE tool counts
-- **VERIFIED**: `/sse` returns 200 text/event-stream; Roocode connects (green indicator); tools now list correctly; server remains responsive; tools are callable and execute properly
-- **Notes**: Occasional `SseError: other side closed` in Roocode logs indicates reconnect behavior; not impacting tool calls
 
-The blocking problem is SOLVED and SSE transport is stable with Uvicorn. Roocode can now run MCP tools successfully via SSE transport.
+### Root Cause Discovered
+- **MCP library version 1.12.2 had broken SSE implementation** - SSE connections would hang indefinitely, never sending response headers
+- **Threading lock in async context** - Used `threading.Lock()` instead of `asyncio.Lock()` causing potential deadlocks in lifespan context manager
+- **FastMCP API changed** - Newer versions no longer accept `description`, `host`, `port` parameters in constructor
+
+### Solution Applied
+1. **Upgraded MCP library from 1.12.2 to 1.25.0** (`python/pyproject.toml`)
+   - Fixed SSE implementation that was causing connection hangs
+   - SSE connections now properly establish and maintain streaming responses
+   
+2. **Updated FastMCP initialization** (`python/src/mcp_server/mcp_server.py` line ~329)
+   - Removed deprecated parameters: `description`, `host`, `port`
+   - Now only passes: `name`, `instructions`, `lifespan`
+   
+3. **Fixed async lock usage** (`python/src/mcp_server/mcp_server.py` line ~67)
+   - Replaced `threading.Lock()` with `asyncio.Lock()` via `get_init_lock()` helper
+   - Changed `with _initialization_lock:` to `async with lock:` in lifespan
+   - Prevents deadlocks when multiple SSE connections initialize concurrently
+
+4. **Transport configuration** (`run_hypercorn.py`)
+   - SSE runs under Uvicorn (HTTP/1.1) - non-blocking I/O for long-lived connections
+   - Streamable-HTTP available via Hypercorn with HTTP/2 support (not recommended for remote clients)
+   - Transport selected via `TRANSPORT` env variable in docker-compose.yml
+
+5. **Instrumentation**: ASGI wrapper `src/mcp_server/utils/asgi_debug.py` enabled with `MCP_DEBUG=true`
+
+### Verification Results
+- ✅ `/sse` endpoint responds properly with streaming connection
+- ✅ mcp-remote establishes proxy successfully
+- ✅ Roocode connects with green indicator
+- ✅ Tools list correctly and execute without blocking
+- ✅ Server remains responsive to concurrent connections
+- ✅ Health checks pass consistently
+
+The blocking problem is SOLVED. SSE transport works reliably with MCP 1.25.0 + Uvicorn. Roocode can now run MCP tools successfully.
 
 ## Running Tools in Roocode
 - Open Roocode chat (Cmd/Ctrl+L or "New Chat")

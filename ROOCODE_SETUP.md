@@ -10,9 +10,20 @@ This document describes the setup for connecting Roocode and other remote MCP cl
 
 **GitHub Issue:** [#920 - MCP Server Connection Timeout with mcp-remote Clients](https://github.com/coleam00/Archon/issues/920)
 
+### Original Problem
 The original Archon MCP server used FastMCP's `streamable-http` transport with Hypercorn, which caused event-loop blocking and timeouts when remote clients connected. The connection would appear to work initially but block all other requests.
 
-**Solution:** Switch to SSE (Server-Sent Events) transport served by Uvicorn, which is non-blocking and handles long-lived client connections properly.
+### Root Cause Discovered (January 2026)
+**MCP library version 1.12.2 had a broken SSE implementation:**
+- SSE connections would hang indefinitely without sending response headers
+- Threading lock (`threading.Lock()`) in async lifespan caused potential deadlocks
+- FastMCP API changes made old initialization parameters incompatible
+
+### Solution
+1. **Upgrade to MCP 1.25.0** - Fixed SSE implementation
+2. **Update FastMCP initialization** - Remove deprecated `description`, `host`, `port` parameters
+3. **Replace threading.Lock with asyncio.Lock** - Prevent async deadlocks
+4. **Use Uvicorn for SSE transport** - Non-blocking I/O for long-lived connections
 
 ## Applied Configuration
 
@@ -203,7 +214,10 @@ Expected: `content-type: text/event-stream`
 
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
+| SSE connections hang, no response | MCP library version too old (< 1.25.0) | Update `python/pyproject.toml` to `mcp==1.25.0`, rebuild: `docker compose build --no-cache archon-mcp` |
+| FastMCP initialization error about 'description' | Using old FastMCP API with new library | Remove `description`, `host`, `port` from `FastMCP()` constructor |
 | Roocode timeout on connection | SSE transport not selected | Verify `TRANSPORT=sse` in `docker-compose.yml` and `--transport sse-only` in Roocode config |
+| Server deadlocks on concurrent connections | Using threading.Lock in async code | Replace `threading.Lock()` with `asyncio.Lock()`, use `async with lock` |
 | Backend shows "unhealthy" but MCP is responding | Health check timeout too short or endpoint slow | Update both `docker-compose.yml` AND `.env` to `MCP_HEALTH_CHECK_TIMEOUT=10` |
 | Backend shows "unhealthy" after restart | Changes to docker-compose.yml ignored | Check `.env` file for conflicting value of `MCP_HEALTH_CHECK_TIMEOUT` |
 | `/sse` returns 503 or hangs | Uvicorn not running for SSE transport | Check `run_hypercorn.py` reads TRANSPORT env and uses `mcp.sse_app()` |
@@ -212,9 +226,24 @@ Expected: `content-type: text/event-stream`
 
 ## Implementation Notes
 
+- **MCP Library Version:** 1.25.0 (critical - earlier versions have broken SSE)
 - **Transport selection:** Controlled via `TRANSPORT` environment variable (default: `sse`)
 - **Uvicorn for SSE:** Non-blocking I/O suitable for long-lived connections
 - **Hypercorn for streamable-http:** Available if needed, but SSE is preferred for remote clients
+- **Async lock usage:** Uses `asyncio.Lock()` in lifespan to prevent deadlocks with concurrent connections
+- **FastMCP initialization:** Only passes `name`, `instructions`, `lifespan` (no `description`, `host`, `port`)
 - **Instrumentation:** `MCP_DEBUG=true` enables ASGI wrapper logging of MCP requests and tool counts
 - **Health endpoint:** `/health` returns JSON with server status, service dependencies, and uptime
+
+## Version Requirements
+
+**Critical:** MCP library must be >= 1.25.0 for SSE to work properly.
+
+In `python/pyproject.toml`:
+```toml
+mcp = [
+    "mcp==1.25.0",  # Earlier versions (e.g., 1.12.2) have broken SSE
+    ...
+]
+```
 
